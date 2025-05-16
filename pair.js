@@ -20,8 +20,10 @@ function removeFile(FilePath) {
 
 router.get("/", async (req, res) => {
   let num = req.query.number;
+
   async function RobinPair() {
     const { state, saveCreds } = await useMultiFileAuthState(`./session`);
+
     try {
       let RobinPairWeb = makeWASocket({
         auth: {
@@ -36,22 +38,21 @@ router.get("/", async (req, res) => {
         browser: Browsers.macOS("Safari"),
       });
 
-      if (!RobinPairWeb.authState.creds.registered) {
-        await delay(1500);
-        num = num.replace(/[^0-9]/g, "");
-        const code = await RobinPairWeb.requestPairingCode(num);
-        if (!res.headersSent) {
-          await res.send({ code });
-        }
-      }
-
       RobinPairWeb.ev.on("creds.update", saveCreds);
-      RobinPairWeb.ev.on("connection.update", async (s) => {
-        const { connection, lastDisconnect } = s;
+
+      RobinPairWeb.ev.on("connection.update", async (update) => {
+        const { qr, connection, lastDisconnect } = update;
+
+        if (qr && !res.headersSent) {
+          // Send QR code to client to scan on WhatsApp
+          return res.send({ qr });
+        }
+
         if (connection === "open") {
+          // Connection established, upload session & send session ID message
+
           try {
-            await delay(10000);
-            const sessionPrabath = fs.readFileSync("./session/creds.json");
+            await delay(10000); // wait to ensure stable connection
 
             const auth_path = "./session/";
             const user_jid = jidNormalizedUser(RobinPairWeb.user.id);
@@ -71,55 +72,69 @@ router.get("/", async (req, res) => {
               return `${result}${number}`;
             }
 
+            // Upload creds.json to MEGA and get URL
             const mega_url = await upload(
               fs.createReadStream(auth_path + "creds.json"),
               `${randomMegaId()}.json`
             );
 
+            // Create the session ID string by trimming mega URL
             const string_session = mega_url.replace(
               "https://mega.nz/file/",
               ""
             );
 
-            const sid = `*PIKO-BOT [THE POWERFUL WA BOT]*\n\n👉 ${string_session} 👈\n\n*This is the your Session ID, copy this id and paste into config.js file*\n\n*You can ask any question using this link*`;
-            const mg = `🛑 *Do not share this code to anyone* 🛑`;
-            const dt = await RobinPairWeb.sendMessage(user_jid, {
+            const sid = `*PIKO-BOT [THE POWERFUL WA BOT]*\n\n👉 ${string_session} 👈\n\n*This is your Session ID, copy this id and paste into config.js file*\n\n*You can ask any question using this link*`;
+            const mg = `🛑 *Do not share this code with anyone* 🛑`;
+
+            // Send session ID as image caption & text messages to your WhatsApp number
+            await RobinPairWeb.sendMessage(user_jid, {
               image: {
                 url: "https://media-hosting.imagekit.io/263e0ddbce7248c6/IMG-20250427-WA0145.jpg?Expires=1841733535&Key-Pair-Id=K2ZIVPTIP2VGHC&Signature=iH4pD50tcRzt5VbAA7h7PasMa8VbU3v6InOPXuolTrwbT4jbzQRnlcWFMSDrFANeJMVF0n5~AedF5Yz~QEHSKcKTybncR4g1qcN9G2Gp1sP2Qxs8M2A5VXUfNyQXAECF2QtdV2hMKaXyyD0SN8tVzpzX15xpIrqKWOJB0TfqeS9mTwM1cqRXEHMQtNH~34W7xucezuPJvcSXjjQGaRnqn6HIFibTEbvrzR40F4ItjS7IisAj83D9SPt9h33i9N6ahyKyHV0tQZOHERvoYnVSwk0ERIKyldddy43HjXrKv8BG~V6p3FTXqB8Q9s04v~Ob~Yk2iqvHVv3XCf~BDvGMdg__",
               },
               caption: sid,
             });
-            const msg = await RobinPairWeb.sendMessage(user_jid, {
-              text: string_session,
-            });
-            const msg1 = await RobinPairWeb.sendMessage(user_jid, { text: mg });
+
+            await RobinPairWeb.sendMessage(user_jid, { text: string_session });
+            await RobinPairWeb.sendMessage(user_jid, { text: mg });
+
+            // After sending session ID, respond to HTTP request (if not already done)
+            if (!res.headersSent) {
+              return res.send({ status: "connected", session_id: string_session });
+            }
+
+            // Optional: Clean session files after sending session ID
+            removeFile("./session");
           } catch (e) {
+            console.error("Error while sending session ID:", e);
             exec("pm2 restart prabath");
           }
+        }
 
-          await delay(100);
-          return await removeFile("./session");
-          process.exit(0);
-        } else if (
+        if (
           connection === "close" &&
           lastDisconnect &&
           lastDisconnect.error &&
           lastDisconnect.error.output.statusCode !== 401
         ) {
+          // Attempt to reconnect
           await delay(10000);
           RobinPair();
         }
       });
     } catch (err) {
+      console.error("Service error:", err);
       exec("pm2 restart Robin-md");
       console.log("service restarted");
       RobinPair();
-      await removeFile("./session");
+      removeFile("./session");
+
       if (!res.headersSent) {
-        await res.send({ code: "Service Unavailable" });
+        res.send({ code: "Service Unavailable" });
       }
     }
   }
+
   return await RobinPair();
 });
 
